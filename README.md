@@ -1,119 +1,116 @@
-# ec2operator
-// TODO(user): Add simple overview of use/purpose
+# EC2 Operator
+
+A Kubernetes-native operator, written in Go, that manages the full lifecycle of AWS EC2 instances declaratively — through Kubernetes Custom Resource Definitions (CRDs) — instead of manual provisioning via the AWS Console or CLI.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+This project lets you describe the EC2 instance you want as a Kubernetes resource, and the operator takes care of actually creating, updating, and deleting it in AWS to match. It follows the same reconciliation pattern Kubernetes itself uses internally: you declare *desired state*, and a controller continuously works to make *actual state* match it.
+
+Built with [kubebuilder](https://book.kubebuilder.io/) and [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime), using the AWS SDK for Go to interact with EC2.
+
+### What it does
+
+- Watches `Ec2Instance` custom resources and reconciles them against real AWS EC2 state
+- Creates, updates, and terminates EC2 instances based on the CR spec
+- Uses a finalizer to ensure the AWS instance is properly terminated before the CR is removed from Kubernetes, avoiding orphaned cloud resources
+- Writes live instance data (public IP, instance ID) back into the CR's `status`, so `kubectl get` shows real-time state
+- Packaged as a Helm chart for installation, including CRDs, RBAC, and the controller deployment
+
+### Custom Resource spec
+
+An `Ec2Instance` resource supports the following fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `amiId` | string | Yes | AMI to launch the instance from |
+| `instanceType` | string | Yes | EC2 instance type (e.g. `t2.micro`) |
+| `region` | string | Yes | AWS region to provision in |
+| `availabilityZone` | string | No | Specific AZ within the region |
+| `subnet` | string | No | Subnet to launch into |
+| `securityGroups` | []string | No | Security groups to attach |
+| `associatePublicIP` | boolean | No | Whether to assign a public IP |
+| `keyPair` | string | No | SSH key pair name |
+| `storage` | object | No | Storage configuration for the instance |
+| `tags` | map[string]string | No | Tags to apply to the instance |
+| `userData` | string | No | Instance bootstrap script |
 
 ## Getting Started
 
 ### Prerequisites
-- go version v1.23.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- Go v1.23+
+- Docker
+- kubectl
+- Access to a Kubernetes cluster (tested locally with [kind](https://kind.sigs.k8s.io/))
+- Helm v3+
+- AWS credentials with EC2 permissions
 
-```sh
-make docker-build docker-push IMG=<some-registry>/ec2operator:tag
+### Deploying with Helm (recommended)
+
+This is the tested, working installation path:
+
+```bash
+# 1. Create a namespace and install the chart
+helm install ec2-operator ./helm/charts/ec2-operator \
+  --namespace ec2-operator-system --create-namespace
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+> **Note:** the chart currently creates its own `ec2-operator` namespace as part of its templates, so resources land there regardless of the `--namespace` flag passed to Helm. This is a known detail I plan to clean up by templating the namespace name properly (`{{ .Release.Namespace }}`).
 
-**Install the CRDs into the cluster:**
+Verify the controller is running:
 
-```sh
+```bash
+kubectl get pods -n ec2-operator
+```
+
+You should see the controller pod in `Running` state.
+
+### Deploying manually (without Helm)
+
+```bash
+# Install the CRDs
 make install
+
+# Build and push your image
+make docker-build docker-push IMG=<your-registry>/ec2operator:tag
+
+# Deploy the controller
+make deploy IMG=<your-registry>/ec2operator:tag
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+### Creating an instance
 
-```sh
-make deploy IMG=<some-registry>/ec2operator:tag
-```
-
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
+```bash
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+Check the resulting resource, including its live AWS status:
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
+```bash
+kubectl get ec2instances
+kubectl describe ec2instance <name>
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+### Cleaning up
 
-```sh
+```bash
+kubectl delete -k config/samples/
+helm uninstall ec2-operator -n ec2-operator-system
 make uninstall
 ```
 
-**UnDeploy the controller from the cluster:**
+## Why I built this
 
-```sh
-make undeploy
-```
+I built this after a CNCF LFX Mentorship on the Kyverno project, where I worked deeply with Kubernetes' controller and reconciliation model. I wanted to build one myself from scratch — CRD design, reconciliation logic, and real integration with an external system (AWS) — rather than just working within an existing controller.
 
-## Project Distribution
+## Known limitations / next steps
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/ec2operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/ec2operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+- AWS credentials are read from environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) inside the controller, injected via `secretKeyRef` from the `aws-config` Kubernetes Secret rather than being embedded in the CR spec or container image — this is the correct pattern; an earlier version of this project passed credentials directly in the CR spec, which is not secure, and was corrected.
+- The chart's namespace is currently hardcoded rather than following `{{ .Release.Namespace }}`.
+- No support yet for detecting and reacting to changes made directly in AWS outside of Kubernetes (e.g. via EventBridge) — drift is currently only corrected on the next scheduled reconcile, not in real time.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+Issues and PRs are welcome. Run `make help` for available `make` targets.
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
+More on the underlying framework: [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
