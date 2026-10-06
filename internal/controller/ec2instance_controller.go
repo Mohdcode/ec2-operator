@@ -4,14 +4,14 @@ import (
 	"context"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
 )
 
 // Ec2InstanceReconciler is a struct that implements the logic for reconciling Ec2Instance custom resources.
@@ -96,37 +96,39 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Check if we already have an instance ID in status
 	if ec2Instance.Status.InstanceID != "" {
-		l.Info("Requested object already exists in Kubernetes. Not creating a new instance.", "instanceID", ec2Instance.Status.InstanceID)
-		//============================================//
-		// Your TODO : Implement Your Drift Detection //
-		//============================================//
-		// // Instance already exists, verify it's still running
-		// instanceExist, instanceState, _ := checkEC2InstanceExists(ctx, ec2Instance.Status.InstanceID, ec2Instance)
-		// // if err != nil {
-		// // 	// Instance might be terminated, clear status and recreate
-		// // 	ec2Instance.Status.InstanceID = ""
-		// // 	ec2Instance.Status.State = ""
-		// // 	ec2Instance.Status.PublicIP = ""
-		// // 	ec2Instance.Status.PrivateIP = ""
-		// // 	ec2Instance.Status.PublicDNS = ""
-		// // 	ec2Instance.Status.PrivateDNS = ""
-		// // 	return ctrl.Result{Requeue: true}, r.Status().Update(ctx, ec2Instance)
-		// // }
-		// if !instanceExist {
-		// 	l.Info("Instance does not exist or is not running", "instanceID", ec2Instance.Status.InstanceID)
-		// 	ec2Instance.Status.State = "Unknown"
-		// 	ec2Instance.Status.PublicIP = ""
-		// 	r.Status().Update(ctx, ec2Instance)
-		// 	return ctrl.Result{}, nil
-		// }
-		// if instanceExist && ec2Instance.Status.State == "Unknown" {
-		// 	l.Info("Found a running Instance", "instanceID", ec2Instance.Status.InstanceID)
-		// 	ec2Instance.Status.State = string(instanceState.State.Name)
-		// 	ec2Instance.Status.PublicIP = *instanceState.PublicIpAddress
-		// 	r.Status().Update(ctx, ec2Instance)
-		// 	return ctrl.Result{}, nil
-		// }
-		return ctrl.Result{}, nil
+		l.Info("Verifying existing instance state", "instanceID", ec2Instance.Status.InstanceID)
+		
+		instanceExist, instanceState, err := checkEC2InstanceExists(ctx, ec2Instance.Status.InstanceID, ec2Instance)
+		if err != nil {
+			l.Error(err, "Failed to check instance existence")
+			return ctrl.Result{}, err
+		}
+
+		if !instanceExist {
+			l.Info("Instance does not exist in AWS. Clearing status to trigger recreation", "instanceID", ec2Instance.Status.InstanceID)
+			ec2Instance.Status.InstanceID = ""
+			ec2Instance.Status.State = ""
+			ec2Instance.Status.PublicIP = ""
+			if err := r.Status().Update(ctx, ec2Instance); err != nil {
+				l.Error(err, "Failed to clear status")
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		// Update state and IP if they changed (Drift Correction)
+		if ec2Instance.Status.State != string(instanceState.State.Name) || ec2Instance.Status.PublicIP != aws.ToString(instanceState.PublicIpAddress) {
+			l.Info("Detected drift in instance state/IP. Updating status", 
+				"oldState", ec2Instance.Status.State, "newState", string(instanceState.State.Name))
+			
+			ec2Instance.Status.State = string(instanceState.State.Name)
+			ec2Instance.Status.PublicIP = aws.ToString(instanceState.PublicIpAddress)
+			if err := r.Status().Update(ctx, ec2Instance); err != nil {
+				l.Error(err, "Failed to update status after drift detection")
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	l.Info("Creating new instance")
 

@@ -41,8 +41,6 @@ type Ec2Instance struct {
 
 // Ec2InstanceStatus defines the observed state of Ec2Instance.
 type Ec2InstanceStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 	InstanceID string       `json:"instanceId,omitempty"`
 	State      string       `json:"state,omitempty"`
 	PublicIP   string       `json:"publicIP,omitempty"`
@@ -50,6 +48,7 @@ type Ec2InstanceStatus struct {
 	PublicDNS  string       `json:"publicDNS,omitempty"`
 	PrivateDNS string       `json:"privateDNS,omitempty"`
 	LaunchTime *metav1.Time `json:"launchTime,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // StorageConfig defines the storage configuration for the EC2 instance.

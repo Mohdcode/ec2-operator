@@ -12,6 +12,8 @@ Built with [kubebuilder](https://book.kubebuilder.io/) and [controller-runtime](
 
 - Watches `Ec2Instance` custom resources and reconciles them against real AWS EC2 state
 - Creates, updates, and terminates EC2 instances based on the CR spec
+- **Active Drift Detection**: Periodically verifies AWS state and automatically corrects discrepancies or clears status if the instance was manually deleted
+- **Production-Grade Status**: Uses standard Kubernetes Conditions (Ready, Synced) to provide detailed state transitions and error reporting
 - Uses a finalizer to ensure the AWS instance is properly terminated before the CR is removed from Kubernetes, avoiding orphaned cloud resources
 - Writes live instance data (public IP, instance ID) back into the CR's `status`, so `kubectl get` shows real-time state
 - Packaged as a Helm chart for installation, including CRDs, RBAC, and the controller deployment
@@ -35,16 +37,43 @@ An `Ec2Instance` resource supports the following fields:
 | `userData` | string | No | Instance bootstrap script |
 
 ## Getting Started
-
+ 
 ### Prerequisites
-
+ 
 - Go v1.23+
 - Docker
 - kubectl
 - Access to a Kubernetes cluster (tested locally with [kind](https://kind.sigs.k8s.io/))
 - Helm v3+
-- AWS credentials with EC2 permissions
-
+- AWS credentials with EC2 permissions (or LocalStack for local testing)
+ 
+### Local Testing with LocalStack (No AWS Account Needed)
+ 
+You can test the operator locally using [LocalStack](https://localstack.cloud/) to emulate AWS:
+ 
+1. **Start LocalStack (Community Version)**:
+    ```bash
+    docker run -d --name localstack \
+      -p 4566:4566 \
+      --platform linux/amd64 \
+      localstack/localstack:2.0
+    ```
+    *Note: Using version 2.0 ensures the community edition is used without requiring a license token.*
+ 
+2. **Run the Operator locally**:
+    ```bash
+    export AWS_ACCESS_KEY_ID=test
+    export AWS_SECRET_ACCESS_KEY=test
+    export AWS_ENDPOINT=http://localhost:4566
+    go run cmd/main.go
+    ```
+ 
+3. **Provision an instance**:
+    ```bash
+    kubectl apply -k config/samples/
+    kubectl get ec2instances -w
+    ```
+ 
 ### Deploying with Helm (recommended)
 
 This is the tested, working installation path:
@@ -107,7 +136,7 @@ I built this after a CNCF LFX Mentorship on the Kyverno project, where I worked 
 
 - AWS credentials are read from environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) inside the controller, injected via `secretKeyRef` from the `aws-config` Kubernetes Secret rather than being embedded in the CR spec or container image — this is the correct pattern; an earlier version of this project passed credentials directly in the CR spec, which is not secure, and was corrected.
 - The chart's namespace is currently hardcoded rather than following `{{ .Release.Namespace }}`.
-- No support yet for detecting and reacting to changes made directly in AWS outside of Kubernetes (e.g. via EventBridge) — drift is currently only corrected on the next scheduled reconcile, not in real time.
+- No support yet for reacting to AWS changes in real-time via EventBridge; drift is corrected during the periodic reconciliation cycle.
 
 ## Contributing
 
