@@ -19,6 +19,6 @@ jobs:
       - name: Build Dev Container and run checks inside it
         uses: devcontainers/ci@v0.3
         with:
-          imageName: ec2-operator-devcontainer:ci
+          imageName: ec2-operator-devcontainer-ci
           push: never
           runCmd: make ci

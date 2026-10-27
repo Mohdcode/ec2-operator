@@ -29,7 +29,7 @@ jobs:
       - name: Build Dev Container and run all release checks inside it
         uses: devcontainers/ci@v0.3
         with:
-          imageName: ec2-operator-devcontainer:release
+          imageName: ec2-operator-devcontainer-release
           push: never
           runCmd: make ci
 
