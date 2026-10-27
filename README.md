@@ -138,7 +138,16 @@ helm uninstall ec2-operator --namespace ec2-operator-system
 
 If the custom resource is removed from Kubernetes without the operator running, its finalizer cannot finish the AWS cleanup. Verify termination in AWS before considering the test cleaned up.
 
-Pushing a `vX.Y.Z` Git tag first runs the full Dev Container CI suite: dependency-tidiness verification, Go lint and tests, Kubebuilder E2E tests, Helm chart installation on kind, and the LocalStack EC2 integration demo. Only when those checks pass does the workflow publish a version-tagged container image and Helm chart to GitHub Container Registry. The image includes build provenance and an SBOM. Protect release tags with a GitHub ruleset to prevent them from being moved or reused. Publishing uses the repository's built-in GitHub token and does not deploy to AWS.
+### Publish a release
+
+After the release commit has been pushed and `make ci` passes, create and push an unused `vMAJOR.MINOR.PATCH` tag. For example:
+
+```bash
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+Replace `v0.2.0` with the next release version. Pushing the tag starts the `Release` workflow, which validates the tag format and runs the full Dev Container CI suite: dependency-tidiness verification, Go lint and tests, Kubebuilder E2E tests, Helm chart installation on kind, and the LocalStack EC2 integration demo. Only when those checks pass does it publish a version-tagged container image and Helm chart to GitHub Container Registry. The image includes build provenance and an SBOM. Protect release tags with a GitHub ruleset to prevent them from being moved or reused. Publishing uses the repository's built-in GitHub token; it does not deploy to staging or AWS.
 
 When a staging Kubernetes cluster is available, the `Deploy to staging` workflow can be run manually with a published release tag. Configure a GitHub Environment named `staging` with a `KUBECONFIG` secret first. The workflow installs or upgrades the operator and waits for its Deployment to become ready; it does not create an `Ec2Instance` or launch cloud resources. Make the GHCR image public or create an image-pull Secret in the staging namespace and set the environment variable `GHCR_PULL_SECRET_NAME` to that Secret's name. Protect the staging environment with required reviewers and configure the operator's AWS workload identity separately before testing real EC2 provisioning.
 
