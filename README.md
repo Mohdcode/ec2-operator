@@ -36,37 +36,90 @@ make local-demo-clean
 
 The local run checks the operator against LocalStack's EC2 API implementation. Emulator behavior can differ from AWS, so this does not establish that a deployment or every EC2 feature works in a real AWS account.
 
-## Run checks
+## Test locally
+
+The test paths cover different parts of the project:
 
 ```bash
+# Unit and controller tests (uses Kubernetes envtest binaries; no cluster or AWS account)
 make test
+
+# Static analysis
 make lint
+
+# Helm chart validation
 helm lint ./helm/charts/ec2-operator
 ```
 
-The `Local EC2 integration` GitHub Actions workflow builds the image and runs `make local-demo` on pull requests and pushes. It needs no AWS credentials or hosted Kubernetes cluster. The existing `test-e2e` target covers the controller manager and metrics endpoint in kind.
-
-Pushing a `vX.Y.Z` Git tag runs the release workflow, which publishes the container image to GitHub Container Registry and the Helm chart as an OCI artifact. This publishing step uses the repository's built-in GitHub token and does not deploy to AWS.
-
-When a staging Kubernetes cluster is available, the `Deploy to staging` workflow can be run manually with a published release tag. Configure a GitHub Environment named `staging` with a `KUBECONFIG` secret first. The workflow installs or upgrades the operator and waits for its Deployment to become ready; it does not create an `Ec2Instance` or launch cloud resources. Make the GHCR image public or create an image-pull Secret in the staging namespace and set the environment variable `GHCR_PULL_SECRET_NAME` to that Secret's name. The operator needs AWS credentials or a workload identity in the cluster only when it is asked to manage an EC2 resource.
-
-## Install against AWS
-
-The chart uses the AWS SDK's default credential chain, so it can use environment credentials or a workload identity/pod role. To provide credentials through a pre-created Kubernetes Secret, create one in the release namespace:
+For a manager deployment and metrics smoke test in kind, create a kind cluster named `kind` and run:
 
 ```bash
-kubectl create namespace ec2-operator-system
-kubectl create secret generic aws-credentials \
-  --namespace ec2-operator-system \
-  --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
-
-helm upgrade --install ec2-operator ./helm/charts/ec2-operator \
-  --namespace ec2-operator-system \
-  --set aws.credentialsSecretName=aws-credentials
+make test-e2e
 ```
 
-Do not put real credentials in chart values or commit them to the repository. To target an AWS-compatible local endpoint, set `aws.endpoint` and reference a Secret containing that service's test credentials.
+This test does not create EC2 instances. For end-to-end testing of the EC2 API calls without AWS credentials, use the LocalStack demo in [Try it locally without AWS](#try-it-locally-without-aws). The `Local EC2 integration` GitHub Actions workflow runs that same demo on pull requests and pushes. The `Test Chart` workflow also builds the operator image and installs the release chart into kind, then waits for the deployment and CRD. LocalStack is an emulator, so a successful demo does not prove that a request will work with AWS IAM, a particular AMI, subnet, or security group.
+
+## Test against a real AWS account
+
+This test launches a real EC2 instance and can incur EC2, EBS, and public IPv4 charges. Use a disposable non-production account, a region where you are permitted to launch resources, and clean up by deleting the `Ec2Instance` resource as described below. Do not use the sample AMI ID unchanged: AMI IDs are region-specific and may no longer be available.
+
+The operator can run in EKS or another Kubernetes cluster that can reach the AWS EC2 API. Give the operator pod an AWS identity through EKS Pod Identity or IRSA where available; the chart's service account supports annotations. For example, save this as a local `aws-values.yaml` and replace the role ARN:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/ec2-operator-test
+```
+
+Configure the role trust policy for the operator's Kubernetes service account. Grant the role `ec2:RunInstances`, `ec2:DescribeInstances`, and `ec2:TerminateInstances`, scoped to the test resources where possible. Because the sample adds EC2 tags at launch, it also needs `ec2:CreateTags` restricted to tagging during `RunInstances` (for example, with the `ec2:CreateAction` condition). Scope `ec2:RunInstances` to the AMIs and network resources you intend to use; EC2 resource-level authorization is more involved than a single instance ARN.
+
+If workload identity is unavailable, the chart can read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from a pre-created Kubernetes Secret using `aws.credentialsSecretName`. Avoid putting credentials in chart values or committing the secret.
+
+Install a published chart version (replace the version and tag with a release that exists in GHCR):
+
+```bash
+helm upgrade --install ec2-operator \
+  oci://ghcr.io/mohdcode/charts/ec2-operator \
+  --version 0.2.0 \
+  --namespace ec2-operator-system \
+  --create-namespace \
+  --set image.repository=ghcr.io/mohdcode/ec2-operator \
+  --set image.tag=v0.2.0 \
+  --values aws-values.yaml
+```
+
+Copy the sample to a working file, then set an AMI valid in your target region. For a safer network setup, choose a subnet and security groups you control and leave `associatePublicIP` false unless a public address is specifically needed:
+
+```bash
+cp config/samples/compute_v1_ec2instance.yaml /tmp/ec2instance-aws-test.yaml
+# Edit amiId and region; set associatePublicIP: false, and optionally set subnet and securityGroups.
+kubectl apply -f /tmp/ec2instance-aws-test.yaml
+kubectl get ec2instance ec2instance-sample --watch
+kubectl describe ec2instance ec2instance-sample
+```
+
+Check that the resource reports an instance ID and `Ready=True`. The operator creates the EC2 instance but does not configure or install an operating system on it. The controller also does not update an existing EC2 instance when its spec is edited.
+
+Delete the custom resource before uninstalling the chart. Its finalizer asks AWS to terminate the instance and waits for termination before allowing Kubernetes to remove the resource:
+
+```bash
+instance_id="$(kubectl get ec2instance ec2instance-sample -o jsonpath='{.status.instanceId}')"
+kubectl delete -f /tmp/ec2instance-aws-test.yaml
+kubectl wait --for=delete ec2instance/ec2instance-sample --timeout=6m
+region=us-east-1 # Use the same region as the custom resource.
+aws ec2 wait instance-terminated \
+  --instance-ids "$instance_id" \
+  --region "$region"
+helm uninstall ec2-operator --namespace ec2-operator-system
+```
+
+If the custom resource is removed from Kubernetes without the operator running, its finalizer cannot finish the AWS cleanup. Verify termination in AWS before considering the test cleaned up.
+
+Pushing a `vX.Y.Z` Git tag first runs release validation: Go lint and tests, dependency-tidiness verification, chart lint, and the LocalStack integration demo. Only when those checks pass does the workflow publish a version-tagged container image and Helm chart to GitHub Container Registry. The image includes build provenance and an SBOM. Protect release tags with a GitHub ruleset to prevent them from being moved or reused. Publishing uses the repository's built-in GitHub token and does not deploy to AWS.
+
+When a staging Kubernetes cluster is available, the `Deploy to staging` workflow can be run manually with a published release tag. Configure a GitHub Environment named `staging` with a `KUBECONFIG` secret first. The workflow installs or upgrades the operator and waits for its Deployment to become ready; it does not create an `Ec2Instance` or launch cloud resources. Make the GHCR image public or create an image-pull Secret in the staging namespace and set the environment variable `GHCR_PULL_SECRET_NAME` to that Secret's name. Protect the staging environment with required reviewers and configure the operator's AWS workload identity separately before testing real EC2 provisioning.
+
+The chart uses the AWS SDK's default credential chain. To target an AWS-compatible local endpoint instead, set `aws.endpoint` and reference a Secret containing that service's test credentials; `make local-demo` demonstrates this setup.
 
 ## Custom resource
 

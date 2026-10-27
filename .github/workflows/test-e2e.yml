@@ -8,6 +8,7 @@ jobs:
   test-e2e:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
@@ -17,11 +18,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
+        env:
+          KIND_VERSION: v0.27.0
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
           chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          sudo install ./kind /usr/local/bin/kind
 
       - name: Verify kind installation
         run: kind version
@@ -30,6 +33,15 @@ jobs:
         run: kind create cluster
 
       - name: Running Test e2e
+        run: make test-e2e
+
+      - name: Collect diagnostics on failure
+        if: failure()
         run: |
-          go mod tidy
-          make test-e2e
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp || true
+          kubectl logs -n ec2operator-system deployment/ec2operator-controller-manager --all-containers=true --tail=200 || true
+
+      - name: Clean up kind cluster
+        if: always()
+        run: kind delete cluster

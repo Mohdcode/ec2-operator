@@ -8,7 +8,7 @@ image:
   repository: ghcr.io/mohdcode/ec2-operator
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: latest
+  tag: ""
 
 nameOverride: "ec2-operator"
 fullnameOverride: "ec2-operator"
@@ -61,4 +61,3 @@ securityContext:
   capabilities:
     drop:
     - "ALL"
-
