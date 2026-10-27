@@ -31,7 +31,7 @@ jobs:
         with:
           imageName: ec2-operator-devcontainer-release
           push: never
-          runCmd: make ci
+          runCmd: git config --global --add safe.directory "$PWD" && make ci
 
   publish:
     name: Publish image and Helm chart

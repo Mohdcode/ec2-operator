@@ -21,4 +21,4 @@ jobs:
         with:
           imageName: ec2-operator-devcontainer-ci
           push: never
-          runCmd: make ci
+          runCmd: git config --global --add safe.directory "$PWD" && make ci
