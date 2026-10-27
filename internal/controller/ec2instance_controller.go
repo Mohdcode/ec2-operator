@@ -4,15 +4,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const ec2InstanceStateRunning = "running"
 
 // Ec2InstanceReconciler is a struct that implements the logic for reconciling Ec2Instance custom resources.
 // It embeds the Kubernetes client.Client interface, which provides methods for interacting with the Kubernetes API server,
@@ -48,7 +52,6 @@ This file defines all the permissions your controller needs to interact with Kub
 func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
-	// TODO(user): your logic here
 	l.Info("=== RECONCILE LOOP STARTED ===", "namespace", req.Namespace, "name", req.Name)
 
 	// Create a new instance of the Ec2Instance struct to hold the data retrieved from the Kubernetes API.
@@ -65,9 +68,13 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	//check if deletionTimestamp is not zero
+	// Check if deletionTimestamp is not zero
 	if !ec2Instance.DeletionTimestamp.IsZero() {
 		l.Info("Has deletionTimestamp, Instance is being deleted")
+		if ec2Instance.Status.InstanceID == "" {
+			controllerutil.RemoveFinalizer(ec2Instance, "ec2instance.compute.cloud.com")
+			return ctrl.Result{}, r.Update(ctx, ec2Instance)
+		}
 		_, err := deleteEc2Instance(ctx, ec2Instance)
 		if err != nil {
 			l.Error(err, "Failed to delete EC2 instance")
@@ -97,7 +104,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Check if we already have an instance ID in status
 	if ec2Instance.Status.InstanceID != "" {
 		l.Info("Verifying existing instance state", "instanceID", ec2Instance.Status.InstanceID)
-		
+
 		instanceExist, instanceState, err := checkEC2InstanceExists(ctx, ec2Instance.Status.InstanceID, ec2Instance)
 		if err != nil {
 			l.Error(err, "Failed to check instance existence")
@@ -109,6 +116,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			ec2Instance.Status.InstanceID = ""
 			ec2Instance.Status.State = ""
 			ec2Instance.Status.PublicIP = ""
+			setReadyCondition(ec2Instance, false, "InstanceNotFound", "The EC2 instance is missing and will be recreated")
 			if err := r.Status().Update(ctx, ec2Instance); err != nil {
 				l.Error(err, "Failed to clear status")
 				return ctrl.Result{}, err
@@ -116,13 +124,22 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		// Update state and IP if they changed (Drift Correction)
-		if ec2Instance.Status.State != string(instanceState.State.Name) || ec2Instance.Status.PublicIP != aws.ToString(instanceState.PublicIpAddress) {
-			l.Info("Detected drift in instance state/IP. Updating status", 
-				"oldState", ec2Instance.Status.State, "newState", string(instanceState.State.Name))
-			
-			ec2Instance.Status.State = string(instanceState.State.Name)
+		observedState := ""
+		if instanceState.State != nil {
+			observedState = string(instanceState.State.Name)
+		}
+		readyStatus := metav1.ConditionFalse
+		if observedState == ec2InstanceStateRunning {
+			readyStatus = metav1.ConditionTrue
+		}
+		readyCondition := apiMeta.FindStatusCondition(ec2Instance.Status.Conditions, "Ready")
+		if ec2Instance.Status.State != observedState || ec2Instance.Status.PublicIP != aws.ToString(instanceState.PublicIpAddress) || readyCondition == nil || readyCondition.Status != readyStatus {
+			l.Info("Detected drift in instance state/IP. Updating status",
+				"oldState", ec2Instance.Status.State, "newState", observedState)
+
+			ec2Instance.Status.State = observedState
 			ec2Instance.Status.PublicIP = aws.ToString(instanceState.PublicIpAddress)
+			setReadyCondition(ec2Instance, observedState == ec2InstanceStateRunning, "InstanceStateObserved", "Observed EC2 state: "+observedState)
 			if err := r.Status().Update(ctx, ec2Instance); err != nil {
 				l.Error(err, "Failed to update status after drift detection")
 				return ctrl.Result{}, err
@@ -132,21 +149,17 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	l.Info("Creating new instance")
 
-	l.Info("=== ABOUT TO ADD FINALIZER ===")
-	ec2Instance.Finalizers = append(ec2Instance.Finalizers, "ec2instance.compute.cloud.com")
-	if err := r.Update(ctx, ec2Instance); err != nil { // r.Update() WILL trigger the Reconcile function again via Kubernetes watch mechanism
-		l.Error(err, "Failed to add finalizer")
-		// Kubernetes will retry with backoff
-		return ctrl.Result{
-			Requeue: true,
-		}, err
+	if !controllerutil.ContainsFinalizer(ec2Instance, "ec2instance.compute.cloud.com") {
+		controllerutil.AddFinalizer(ec2Instance, "ec2instance.compute.cloud.com")
+		if err := r.Update(ctx, ec2Instance); err != nil {
+			l.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
-	l.Info("=== FINALIZER ADDED - This update will trigger a NEW reconcile loop, but current reconcile continues ===")
+	// Create a new instance.
 
-	// Create a new instance
-	l.Info("=== CONTINUING WITH EC2 INSTANCE CREATION IN CURRENT RECONCILE ===")
-
-	createdInstanceInfo, err := createEc2Instance(ec2Instance)
+	createdInstanceInfo, err := createEc2Instance(ctx, ec2Instance)
 	if err != nil {
 		l.Error(err, "Failed to create EC2 instance")
 		// Kubernetes will retry with backoff
@@ -163,25 +176,29 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	ec2Instance.Status.PrivateIP = createdInstanceInfo.PrivateIP
 	ec2Instance.Status.PublicDNS = createdInstanceInfo.PublicDNS
 	ec2Instance.Status.PrivateDNS = createdInstanceInfo.PrivateDNS
+	setReadyCondition(ec2Instance, createdInstanceInfo.State == ec2InstanceStateRunning, "InstanceCreated", "EC2 instance created with state: "+createdInstanceInfo.State)
 
-	// The Reconcile function must return a ctrl.Result and an error.
-	// Returning ctrl.Result{} with nil error means the reconciliation was successful
-	// and no requeue is requested. If an error is returned, the controller will
-	// automatically requeue the request for another attempt.
-	// Sends Requeue ( bool ) and RequeueAfter ( time.Duration ).
-	//return ctrl.Result{}, nil
 	err = r.Status().Update(ctx, ec2Instance)
 	if err != nil {
 		l.Error(err, "Failed to update status")
 		// Kubernetes will retry with backoff
 		return ctrl.Result{}, err
 	}
-	l.Info("=== STATUS UPDATED - Reconcile loop will be triggered again ===")
-
-	//fmt.Println("Instance id at the end of the reconcile is", ec2Instance.Status.InstanceID)
-
-	// Kubernetes will not retry - done, wait for next event
 	return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+}
+
+func setReadyCondition(instance *computev1.Ec2Instance, ready bool, reason, message string) {
+	status := metav1.ConditionFalse
+	if ready {
+		status = metav1.ConditionTrue
+	}
+	apiMeta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: instance.Generation,
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

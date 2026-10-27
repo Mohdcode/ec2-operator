@@ -2,8 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
-	"time"
+	"sort"
 
 	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func createEc2Instance(ec2Instance *computev1.Ec2Instance) (createdInstanceInfo *computev1.CreatedInstanceInfo, err error) {
+func createEc2Instance(ctx context.Context, ec2Instance *computev1.Ec2Instance) (createdInstanceInfo *computev1.CreatedInstanceInfo, err error) {
 	l := log.Log.WithName("createEc2Instance")
 
 	l.Info("=== STARTING EC2 INSTANCE CREATION ===",
@@ -21,31 +22,80 @@ func createEc2Instance(ec2Instance *computev1.Ec2Instance) (createdInstanceInfo 
 		"region", ec2Instance.Spec.Region)
 
 	// create the client for ec2 instance
-	ec2Client := awsClient(ec2Instance.Spec.Region)
+	ec2Client, err := awsClient(ctx, ec2Instance.Spec.Region)
+	if err != nil {
+		return nil, err
+	}
 
 	// create the input for the run instances
 	runInput := &ec2.RunInstancesInput{
 		ImageId:      aws.String(ec2Instance.Spec.AMIId),
 		InstanceType: ec2types.InstanceType(ec2Instance.Spec.InstanceType),
-		KeyName:      aws.String(ec2Instance.Spec.KeyPair),
-		SubnetId:     aws.String(ec2Instance.Spec.Subnet),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
-		//SecurityGroupIds: []string{ec2Instance.Spec.SecurityGroups[0]},
+	}
+	if ec2Instance.Spec.KeyPair != "" {
+		runInput.KeyName = aws.String(ec2Instance.Spec.KeyPair)
+	}
+	if ec2Instance.Spec.Subnet != "" && !ec2Instance.Spec.AssociatePublicIP {
+		runInput.SubnetId = aws.String(ec2Instance.Spec.Subnet)
+	}
+	if len(ec2Instance.Spec.SecurityGroups) > 0 && !ec2Instance.Spec.AssociatePublicIP {
+		runInput.SecurityGroupIds = ec2Instance.Spec.SecurityGroups
+	}
+	if ec2Instance.Spec.AvailabilityZone != "" {
+		runInput.Placement = &ec2types.Placement{AvailabilityZone: aws.String(ec2Instance.Spec.AvailabilityZone)}
+	}
+	if ec2Instance.Spec.UserData != "" {
+		runInput.UserData = aws.String(base64.StdEncoding.EncodeToString([]byte(ec2Instance.Spec.UserData)))
+	}
+	if ec2Instance.Spec.AssociatePublicIP {
+		interfaceSpec := ec2types.InstanceNetworkInterfaceSpecification{
+			DeviceIndex:              aws.Int32(0),
+			AssociatePublicIpAddress: aws.Bool(true),
+		}
+		if ec2Instance.Spec.Subnet != "" {
+			interfaceSpec.SubnetId = aws.String(ec2Instance.Spec.Subnet)
+		}
+		interfaceSpec.Groups = ec2Instance.Spec.SecurityGroups
+		runInput.NetworkInterfaces = []ec2types.InstanceNetworkInterfaceSpecification{interfaceSpec}
+	}
+	if len(ec2Instance.Spec.Tags) > 0 {
+		keys := make([]string, 0, len(ec2Instance.Spec.Tags))
+		for key := range ec2Instance.Spec.Tags {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		tags := make([]ec2types.Tag, 0, len(keys))
+		for _, key := range keys {
+			tags = append(tags, ec2types.Tag{Key: aws.String(key), Value: aws.String(ec2Instance.Spec.Tags[key])})
+		}
+		runInput.TagSpecifications = []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeInstance,
+			Tags:         tags,
+		}}
+	}
+	if ec2Instance.Spec.Storage.RootVolume.Size > 0 {
+		root := volumeBlockMapping(ec2Instance.Spec.Storage.RootVolume, "/dev/sda1")
+		runInput.BlockDeviceMappings = append(runInput.BlockDeviceMappings, root)
+	}
+	for _, volume := range ec2Instance.Spec.Storage.AdditionalVolumes {
+		if volume.Size > 0 && volume.DeviceName != "" {
+			runInput.BlockDeviceMappings = append(runInput.BlockDeviceMappings, volumeBlockMapping(volume, volume.DeviceName))
+		}
 	}
 
 	l.Info("=== CALLING AWS RunInstances API ===")
 	// run the instances
-	result, err := ec2Client.RunInstances(context.TODO(), runInput)
+	result, err := ec2Client.RunInstances(ctx, runInput)
 	if err != nil {
 		l.Error(err, "Failed to create EC2 instance")
 		return nil, fmt.Errorf("failed to create EC2 instance: %w", err)
 	}
 
-	if len(result.Instances) == 0 {
+	if result == nil || len(result.Instances) == 0 || result.Instances[0].InstanceId == nil {
 		l.Error(nil, "No instances returned in RunInstancesOutput")
-		fmt.Println("No instances returned in RunInstancesOutput")
-		return nil, nil
+		return nil, fmt.Errorf("EC2 RunInstances returned no instance ID")
 	}
 
 	// Till here, the instance is created and we have
@@ -53,65 +103,17 @@ func createEc2Instance(ec2Instance *computev1.Ec2Instance) (createdInstanceInfo 
 	inst := result.Instances[0]
 	l.Info("=== EC2 INSTANCE CREATED SUCCESSFULLY ===", "instanceID", *inst.InstanceId)
 
-	// Now we need to wait for the instance to be running and then get the public ip and dns
-	l.Info("=== WAITING FOR INSTANCE TO BE RUNNING ===")
-
-	runWaiter := ec2.NewInstanceRunningWaiter(ec2Client)
-	maxWaitTime := 3 * time.Minute // Increased from 10 seconds - instances typically take 30-60 seconds
-
-	err = runWaiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
-		InstanceIds: []string{*inst.InstanceId},
-	}, maxWaitTime)
-	if err != nil {
-		l.Error(err, "Failed to wait for instance to be running")
-		return nil, fmt.Errorf("failed to wait for instance to be running: %w", err)
+	state := "pending"
+	if inst.State != nil {
+		state = string(inst.State.Name)
 	}
-
-	// After creating the instance, we waited and now we describe to
-	// 1. Get the public IP and dns as it takes some time for it
-	// 2. Getting the state of the instance.
-	// We do this so we can send the instance's state to the status of the custom resource. for user to see with kubectl get ec2instances
-	l.Info("=== CALLING AWS DescribeInstances API TO GET INSTANCE DETAILS ===")
-	describeInput := &ec2.DescribeInstancesInput{
-		InstanceIds: []string{*inst.InstanceId},
-	}
-
-	describeResult, err := ec2Client.DescribeInstances(context.TODO(), describeInput)
-	if err != nil {
-		l.Error(err, "Failed to describe EC2 instance")
-		return nil, fmt.Errorf("failed to describe EC2 instance: %w", err)
-	}
-
-	fmt.Println("Describe result", "public ip", *describeResult.Reservations[0].Instances[0].PublicDnsName, "state", describeResult.Reservations[0].Instances[0].State.Name)
-
-	// You get "invalid memory address or nil pointer dereference" here if any of the following are true:
-	// - result.Instances is nil or has length 0
-	// - Any of the pointer fields (e.g., PublicIpAddress, PrivateIpAddress, etc.) are nil
-
-	// To avoid this, always check for nil and length before dereferencing:
-
-	// Wait for a bit to allow instance fields to be populated
-
-	fmt.Printf("Private IP of the instance: %v", derefString(inst.PrivateIpAddress))
-	fmt.Printf("State of the instance: %v", describeResult.Reservations[0].Instances[0].State.Name)
-	fmt.Printf("Private DNS of the instance: %v", derefString(inst.PrivateDnsName))
-	fmt.Printf("Instance ID of the instance: %v", derefString(inst.InstanceId))
-	fmt.Println("Instance Type of the instance: ", inst.InstanceType)
-	fmt.Printf("Image ID of the instance: %v", derefString(inst.ImageId))
-	fmt.Printf("Key Name of the instance: %v", derefString(inst.KeyName))
-
-	// block until the instance is running
-	// blockUntilInstanceRunning(ctx, ec2Instance.Status.InstanceID, ec2Instance)
-
-	// Get the instance details safely (public IP/DNS might be nil for private subnets)
-	instance := describeResult.Reservations[0].Instances[0]
 	createdInstanceInfo = &computev1.CreatedInstanceInfo{
 		InstanceID: *inst.InstanceId,
-		State:      string(instance.State.Name),
-		PublicIP:   derefString(instance.PublicIpAddress),
-		PrivateIP:  derefString(instance.PrivateIpAddress),
-		PublicDNS:  derefString(instance.PublicDnsName),
-		PrivateDNS: derefString(instance.PrivateDnsName),
+		State:      state,
+		PublicIP:   derefString(inst.PublicIpAddress),
+		PrivateIP:  derefString(inst.PrivateIpAddress),
+		PublicDNS:  derefString(inst.PublicDnsName),
+		PrivateDNS: derefString(inst.PrivateDnsName),
 	}
 
 	l.Info("=== EC2 INSTANCE CREATION COMPLETED ===",
@@ -119,10 +121,22 @@ func createEc2Instance(ec2Instance *computev1.Ec2Instance) (createdInstanceInfo 
 		"state", createdInstanceInfo.State,
 		"publicIP", createdInstanceInfo.PublicIP)
 
-	// Optionally, update ec2Instance.Status.InstanceID = *result.Instances[0].InstanceId
-
-	// For now, just return nil to indicate success.
 	return createdInstanceInfo, nil
+}
+
+func volumeBlockMapping(volume computev1.VolumeConfig, defaultDeviceName string) ec2types.BlockDeviceMapping {
+	deviceName := volume.DeviceName
+	if deviceName == "" {
+		deviceName = defaultDeviceName
+	}
+	ebs := &ec2types.EbsBlockDevice{
+		VolumeSize: aws.Int32(volume.Size),
+		Encrypted:  aws.Bool(volume.Encrypted),
+	}
+	if volume.Type != "" {
+		ebs.VolumeType = ec2types.VolumeType(volume.Type)
+	}
+	return ec2types.BlockDeviceMapping{DeviceName: aws.String(deviceName), Ebs: ebs}
 }
 
 // derefString is a helper function to safely dereference *string
@@ -130,5 +144,5 @@ func derefString(s *string) string {
 	if s != nil {
 		return *s
 	}
-	return "<nil>"
+	return ""
 }

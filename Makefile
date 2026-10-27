@@ -1,5 +1,6 @@
 # Image URL to use all building/pushing image targets
-IMG ?= docker.io/Mohdcode/ec2-kubernetes-operator:latest
+IMG ?= ghcr.io/mohdcode/ec2-operator:latest
+LOCAL_IMAGE ?= ec2-operator:local
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -77,6 +78,24 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 	}
 	go test ./test/e2e/ -v -ginkgo.v
 
+.PHONY: local-demo
+local-demo: install-helm ## Build and run the operator against LocalStack in a local kind cluster without AWS credentials.
+	HELM="$(HELM)" LOCAL_IMAGE="$(LOCAL_IMAGE)" bash ./hack/local-demo.sh
+
+.PHONY: local-demo-clean
+local-demo-clean: install-helm ## Remove the local EC2 Operator demo resources and kind cluster.
+	- kubectl delete -f config/samples/compute_v1_ec2instance.yaml --ignore-not-found
+	- $(HELM) uninstall ec2-operator --namespace ec2-operator-system
+	- kubectl delete namespace ec2-operator-system localstack --ignore-not-found
+	- kind delete cluster --name ec2-operator
+
+CI_LOCALBIN ?= $(LOCALBIN)/ci
+
+.PHONY: ci
+ci: ## Run all lint, unit, kind, chart, and LocalStack checks in the Dev Container.
+	LOCALBIN="$(CI_LOCALBIN)" $(MAKE) install-helm
+	HELM="$(CI_LOCALBIN)/helm" LOCALBIN="$(CI_LOCALBIN)" bash ./hack/ci.sh
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
@@ -152,6 +171,9 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
+.PHONY: cd
+cd: deploy ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
@@ -222,3 +244,60 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
+
+##@ Helm Deployment
+
+## Helm binary to use for deploying the chart
+HELM ?= $(LOCALBIN)/helm
+HELM_VERSION ?= v3.17.3
+HELM_OS ?= $(shell go env GOOS)
+HELM_ARCH ?= $(shell go env GOARCH)
+## Namespace to deploy the Helm release
+HELM_NAMESPACE ?= ec2-operator-system
+## Name of the Helm release
+HELM_RELEASE ?= ec2-operator
+## Path to the Helm chart directory
+HELM_CHART_DIR ?= dist/chart
+## Additional arguments to pass to helm commands
+HELM_EXTRA_ARGS ?=
+
+.PHONY: install-helm
+install-helm: $(HELM) ## Install the pinned Helm version locally if necessary.
+
+$(HELM): $(LOCALBIN)
+	archive="$(LOCALBIN)/helm-$(HELM_VERSION)-$(HELM_OS)-$(HELM_ARCH).tar.gz"; \
+	curl -fsSLo "$$archive" "https://get.helm.sh/helm-$(HELM_VERSION)-$(HELM_OS)-$(HELM_ARCH).tar.gz"; \
+	tar -xzf "$$archive" -C "$(LOCALBIN)"; \
+	install -m 0755 "$(LOCALBIN)/$(HELM_OS)-$(HELM_ARCH)/helm" "$@"; \
+	rm -f "$$archive"
+
+.PHONY: helm-deploy
+helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
+	IMG="$(IMG)"; $(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--set manager.image.repository=$${IMG%:*} \
+		--set manager.image.tag=$${IMG##*:} \
+		--wait \
+		--timeout 5m \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-status
+helm-status: ## Show Helm release status.
+	$(HELM) status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-history
+helm-history: ## Show Helm release history.
+	$(HELM) history $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-rollback
+helm-rollback: ## Rollback to previous Helm release.
+	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: helm-chart
+helm-chart: ## Regenerate the v2-alpha Helm chart with the pinned Kubebuilder CLI.
+	bash ./hack/generate-helm-chart.sh

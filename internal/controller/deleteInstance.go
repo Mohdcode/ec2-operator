@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
@@ -15,7 +16,10 @@ func deleteEc2Instance(ctx context.Context, ec2Instance *computev1.Ec2Instance) 
 	l.Info("Deleting EC2 instance", "instanceID", ec2Instance.Status.InstanceID)
 
 	// create the client for ec2 instance
-	ec2Client := awsClient(ec2Instance.Spec.Region)
+	ec2Client, err := awsClient(ctx, ec2Instance.Spec.Region)
+	if err != nil {
+		return false, err
+	}
 
 	// Terminate the instance
 	terminateResult, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
@@ -25,6 +29,9 @@ func deleteEc2Instance(ctx context.Context, ec2Instance *computev1.Ec2Instance) 
 	if err != nil {
 		l.Error(err, "Failed to terminate EC2 instance")
 		return false, err
+	}
+	if terminateResult == nil || len(terminateResult.TerminatingInstances) == 0 {
+		return false, fmt.Errorf("EC2 TerminateInstances returned no state for %s", ec2Instance.Status.InstanceID)
 	}
 
 	l.Info("Instance termination initiated",

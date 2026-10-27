@@ -1,0 +1,38 @@
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.rbac.namespaced }}
+kind: Role
+{{- else }}
+kind: ClusterRole
+{{- end }}
+metadata:
+{{- if .Values.rbac.namespaced }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+  name: {{ include "ec2operator.resourceName" (dict "suffix" "manager-role" "context" $) }}
+rules:
+- apiGroups:
+  - compute.cloud.com
+  resources:
+  - ec2instances
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - compute.cloud.com
+  resources:
+  - ec2instances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - compute.cloud.com
+  resources:
+  - ec2instances/status
+  verbs:
+  - get
+  - patch
+  - update
