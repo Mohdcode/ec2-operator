@@ -16,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const ec2InstanceStateRunning = "running"
+
 // Ec2InstanceReconciler is a struct that implements the logic for reconciling Ec2Instance custom resources.
 // It embeds the Kubernetes client.Client interface, which provides methods for interacting with the Kubernetes API server,
 // and holds a pointer to a runtime.Scheme, which is used for type conversions between Go structs and Kubernetes objects.
@@ -66,7 +68,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	//check if deletionTimestamp is not zero
+	// Check if deletionTimestamp is not zero
 	if !ec2Instance.DeletionTimestamp.IsZero() {
 		l.Info("Has deletionTimestamp, Instance is being deleted")
 		if ec2Instance.Status.InstanceID == "" {
@@ -127,7 +129,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			observedState = string(instanceState.State.Name)
 		}
 		readyStatus := metav1.ConditionFalse
-		if observedState == "running" {
+		if observedState == ec2InstanceStateRunning {
 			readyStatus = metav1.ConditionTrue
 		}
 		readyCondition := apiMeta.FindStatusCondition(ec2Instance.Status.Conditions, "Ready")
@@ -137,7 +139,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 			ec2Instance.Status.State = observedState
 			ec2Instance.Status.PublicIP = aws.ToString(instanceState.PublicIpAddress)
-			setReadyCondition(ec2Instance, observedState == "running", "InstanceStateObserved", "Observed EC2 state: "+observedState)
+			setReadyCondition(ec2Instance, observedState == ec2InstanceStateRunning, "InstanceStateObserved", "Observed EC2 state: "+observedState)
 			if err := r.Status().Update(ctx, ec2Instance); err != nil {
 				l.Error(err, "Failed to update status after drift detection")
 				return ctrl.Result{}, err
@@ -174,7 +176,7 @@ func (r *Ec2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	ec2Instance.Status.PrivateIP = createdInstanceInfo.PrivateIP
 	ec2Instance.Status.PublicDNS = createdInstanceInfo.PublicDNS
 	ec2Instance.Status.PrivateDNS = createdInstanceInfo.PrivateDNS
-	setReadyCondition(ec2Instance, createdInstanceInfo.State == "running", "InstanceCreated", "EC2 instance created with state: "+createdInstanceInfo.State)
+	setReadyCondition(ec2Instance, createdInstanceInfo.State == ec2InstanceStateRunning, "InstanceCreated", "EC2 instance created with state: "+createdInstanceInfo.State)
 
 	err = r.Status().Update(ctx, ec2Instance)
 	if err != nil {
