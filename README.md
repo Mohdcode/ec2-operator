@@ -48,8 +48,20 @@ make test
 make lint
 
 # Helm chart validation
-helm lint ./helm/charts/ec2-operator
+helm lint ./dist/chart
 ```
+
+The released chart is generated from the Kubebuilder `helm/v2-alpha` plugin and lives in `dist/chart`. To regenerate it, install Kubebuilder CLI v4.16.0 and run `make helm-chart`. The chart's generated manifests are refreshed while the project's CI workflow and Helm deployment targets remain intact.
+
+### Run the complete CI suite in the Dev Container
+
+Open the project in its Dev Container in VS Code, then run:
+
+```bash
+make ci
+```
+
+This runs dependency-tidiness, lint, unit tests, Kubebuilder E2E tests, Helm chart installation on kind, and the LocalStack EC2 integration demo. It creates and removes its own kind clusters and refuses to reuse clusters with its reserved names. The `Dev Container CI` GitHub Actions workflow builds this same Dev Container and runs `make ci` inside it; the release validation uses the same path. GitHub-hosted Actions still supplies an Ubuntu VM to build and launch the container, but the project checks and their toolchain run inside the Dev Container rather than directly on the runner.
 
 For a manager deployment and metrics smoke test in kind, create a kind cluster named `kind` and run:
 
@@ -57,7 +69,18 @@ For a manager deployment and metrics smoke test in kind, create a kind cluster n
 make test-e2e
 ```
 
-This test does not create EC2 instances. For end-to-end testing of the EC2 API calls without AWS credentials, use the LocalStack demo in [Try it locally without AWS](#try-it-locally-without-aws). The `Local EC2 integration` GitHub Actions workflow runs that same demo on pull requests and pushes. The `Test Chart` workflow also builds the operator image and installs the release chart into kind, then waits for the deployment and CRD. LocalStack is an emulator, so a successful demo does not prove that a request will work with AWS IAM, a particular AMI, subnet, or security group.
+This test does not create EC2 instances. For end-to-end testing of the EC2 API calls without AWS credentials, use the LocalStack demo in [Try it locally without AWS](#try-it-locally-without-aws). The Dev Container CI workflow runs the chart installation and LocalStack demo on pushes and pull requests. LocalStack is an emulator, so a successful demo does not prove that a request will work with AWS IAM, a particular AMI, subnet, or security group.
+
+### Deploy to your current Kubernetes context
+
+After building or selecting a controller image that your cluster can pull, deploy the current Kustomize manifests with:
+
+```bash
+kubectl config current-context # Confirm the target cluster first.
+make cd IMG=ghcr.io/mohdcode/ec2-operator:v0.2.0
+```
+
+Replace `v0.2.0` with an image tag that exists and is accessible to your cluster. `make cd` is an alias for `make deploy`; it updates the image in `config/manager/kustomization.yaml` and applies the operator to the cluster selected by your current kubeconfig. It does not create a cluster or publish an image. To remove the deployment, run `make undeploy`.
 
 ## Test against a real AWS account
 
@@ -73,7 +96,7 @@ serviceAccount:
 
 Configure the role trust policy for the operator's Kubernetes service account. Grant the role `ec2:RunInstances`, `ec2:DescribeInstances`, and `ec2:TerminateInstances`, scoped to the test resources where possible. Because the sample adds EC2 tags at launch, it also needs `ec2:CreateTags` restricted to tagging during `RunInstances` (for example, with the `ec2:CreateAction` condition). Scope `ec2:RunInstances` to the AMIs and network resources you intend to use; EC2 resource-level authorization is more involved than a single instance ARN.
 
-If workload identity is unavailable, the chart can read `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from a pre-created Kubernetes Secret using `aws.credentialsSecretName`. Avoid putting credentials in chart values or committing the secret.
+If workload identity is unavailable, the chart reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from the optional `aws-credentials` Kubernetes Secret by default. To use a differently named Secret or different key names, override `manager.env` in a values file. Avoid putting credentials in chart values or committing the secret.
 
 Install a published chart version (replace the version and tag with a release that exists in GHCR):
 
@@ -83,8 +106,8 @@ helm upgrade --install ec2-operator \
   --version 0.2.0 \
   --namespace ec2-operator-system \
   --create-namespace \
-  --set image.repository=ghcr.io/mohdcode/ec2-operator \
-  --set image.tag=v0.2.0 \
+  --set manager.image.repository=ghcr.io/mohdcode/ec2-operator \
+  --set manager.image.tag=v0.2.0 \
   --values aws-values.yaml
 ```
 
@@ -115,11 +138,11 @@ helm uninstall ec2-operator --namespace ec2-operator-system
 
 If the custom resource is removed from Kubernetes without the operator running, its finalizer cannot finish the AWS cleanup. Verify termination in AWS before considering the test cleaned up.
 
-Pushing a `vX.Y.Z` Git tag first runs release validation: Go lint and tests, dependency-tidiness verification, chart lint, and the LocalStack integration demo. Only when those checks pass does the workflow publish a version-tagged container image and Helm chart to GitHub Container Registry. The image includes build provenance and an SBOM. Protect release tags with a GitHub ruleset to prevent them from being moved or reused. Publishing uses the repository's built-in GitHub token and does not deploy to AWS.
+Pushing a `vX.Y.Z` Git tag first runs the full Dev Container CI suite: dependency-tidiness verification, Go lint and tests, Kubebuilder E2E tests, Helm chart installation on kind, and the LocalStack EC2 integration demo. Only when those checks pass does the workflow publish a version-tagged container image and Helm chart to GitHub Container Registry. The image includes build provenance and an SBOM. Protect release tags with a GitHub ruleset to prevent them from being moved or reused. Publishing uses the repository's built-in GitHub token and does not deploy to AWS.
 
 When a staging Kubernetes cluster is available, the `Deploy to staging` workflow can be run manually with a published release tag. Configure a GitHub Environment named `staging` with a `KUBECONFIG` secret first. The workflow installs or upgrades the operator and waits for its Deployment to become ready; it does not create an `Ec2Instance` or launch cloud resources. Make the GHCR image public or create an image-pull Secret in the staging namespace and set the environment variable `GHCR_PULL_SECRET_NAME` to that Secret's name. Protect the staging environment with required reviewers and configure the operator's AWS workload identity separately before testing real EC2 provisioning.
 
-The chart uses the AWS SDK's default credential chain. To target an AWS-compatible local endpoint instead, set `aws.endpoint` and reference a Secret containing that service's test credentials; `make local-demo` demonstrates this setup.
+The chart uses the AWS SDK's default credential chain. To target an AWS-compatible local endpoint instead, set `manager.envOverrides.AWS_ENDPOINT` and provide an `aws-credentials` Secret if the service requires credentials; `make local-demo` demonstrates this setup.
 
 ## Custom resource
 
@@ -141,9 +164,9 @@ At launch, the controller passes the declared placement, networking, key pair, u
 
 - `api/v1/`: `Ec2Instance` API types and generated CRD source
 - `internal/controller/`: reconciliation and EC2 client logic
-- `helm/charts/ec2-operator/`: installable Helm chart
+- `dist/chart/`: Kubebuilder v2-alpha generated installable Helm chart
 - `config/localstack/`: LocalStack deployment for the local demo
-- `.github/workflows/local-integration.yml`: no-cloud integration workflow
+- `.github/workflows/devcontainer-ci.yml`: Dev Container CI workflow
 - `terraform/`: supporting infrastructure configuration
 
 ## Contributing

@@ -10,17 +10,12 @@ permissions:
 
 jobs:
   validate:
-    name: Validate release
+    name: Validate release in Dev Container
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
 
       - name: Validate release tag
         env:
@@ -31,42 +26,12 @@ jobs:
             exit 1
           fi
 
-      - name: Check Go dependencies are tidy
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-
-      - name: Run Go lint and tests
-        run: |
-          make lint
-          make test
-
-      - name: Install kind
-        env:
-          KIND_VERSION: v0.27.0
-        run: |
-          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          chmod +x kind
-          sudo install kind /usr/local/bin/kind
-
-      - name: Install Helm
-        env:
-          HELM_VERSION: v3.17.3
-        run: |
-          curl -fsSLo helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
-          tar -xzf helm.tar.gz
-          sudo install linux-amd64/helm /usr/local/bin/helm
-          helm version
-
-      - name: Lint release chart
-        run: helm lint ./helm/charts/ec2-operator
-
-      - name: Run LocalStack integration test
-        run: make local-demo
-
-      - name: Clean up local cluster
-        if: always()
-        run: make local-demo-clean
+      - name: Build Dev Container and run all release checks inside it
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ec2-operator-devcontainer:release
+          push: never
+          runCmd: make ci
 
   publish:
     name: Publish image and Helm chart
@@ -126,5 +91,5 @@ jobs:
           version="${RELEASE_VERSION#v}"
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           helm registry login ghcr.io --username "$GITHUB_ACTOR" --password "$GITHUB_TOKEN"
-          helm package ./helm/charts/ec2-operator --version "$version" --app-version "$RELEASE_VERSION"
+          helm package ./dist/chart --version "$version" --app-version "$RELEASE_VERSION"
           helm push "ec2-operator-${version}.tgz" "oci://ghcr.io/${owner}/charts"

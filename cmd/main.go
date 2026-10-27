@@ -15,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	computev1 "github.com/Mohdcode/ec2Operator/api/v1"
@@ -42,8 +44,10 @@ func init() {
 func main() {
 	var probeAddr string
 	var metricsAddr string
+	var secureMetrics bool
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
+	flag.BoolVar(&secureMetrics, "metrics-secure", true, "Serve metrics over HTTPS with authentication and authorization.")
 
 	opts := zap.Options{
 		Development: true,
@@ -53,6 +57,14 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	metricsOptions := metricsserver.Options{
+		BindAddress:   metricsAddr,
+		SecureServing: secureMetrics,
+	}
+	if secureMetrics {
+		metricsOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
 
 	// Create watcher for webhook certificates
 	// webhookCertWatcher is a pointer to a CertWatcher, which can be used to watch for changes
@@ -72,6 +84,7 @@ func main() {
 	// the webhook server, and the address for health probes. ctrl.GetConfigOrDie() loads the Kubernetes REST config.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Metrics:                metricsOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 	})

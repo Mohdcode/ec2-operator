@@ -75,15 +75,15 @@ jobs:
             --version "$RELEASE_VERSION"
             --namespace ec2-operator-system
             --create-namespace
-            --set image.repository="ghcr.io/${owner}/ec2-operator"
-            --set image.tag="$RELEASE_TAG"
+            --set manager.image.repository="ghcr.io/${owner}/ec2-operator"
+            --set manager.image.tag="$RELEASE_TAG"
             --wait
             --timeout 10m
           )
           if [[ -n "$GHCR_PULL_SECRET_NAME" ]]; then
-            helm_args+=(--set "imagePullSecrets[0].name=$GHCR_PULL_SECRET_NAME")
+            helm_args+=(--set "manager.imagePullSecrets[0].name=$GHCR_PULL_SECRET_NAME")
           fi
           helm "${helm_args[@]}"
-          kubectl rollout status deployment/ec2-operator \
+          kubectl rollout status deployment/ec2-operator-controller-manager \
             --namespace ec2-operator-system \
             --timeout=5m

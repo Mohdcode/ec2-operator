@@ -6,7 +6,9 @@ domain: cloud.com
 layout:
 - go.kubebuilder.io/v4
 plugins:
-  helm.kubebuilder.io/v1-alpha: {}
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: dist
 projectName: ec2operator
 repo: github.com/Mohdcode/ec2Operator
 resources:

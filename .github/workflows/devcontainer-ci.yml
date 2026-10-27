@@ -1,0 +1,24 @@
+name: Dev Container CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build Dev Container and run CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Dev Container and run checks inside it
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ec2-operator-devcontainer:ci
+          push: never
+          runCmd: make ci
