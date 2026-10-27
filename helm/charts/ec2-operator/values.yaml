@@ -5,14 +5,22 @@
 replicaCount: 1
 
 image:
-  repository: docker.io/Mohdcode/ec2-kubernetes-operator
+  repository: ghcr.io/mohdcode/ec2-operator
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: latest
 
 nameOverride: "ec2-operator"
 fullnameOverride: "ec2-operator"
-namespace: "ec2-operator"
+
+aws:
+  # Optional custom AWS-compatible endpoint, for example LocalStack.
+  endpoint: ""
+  # Leave empty to use the AWS SDK default credential chain (such as a pod role).
+  # For LocalStack, point this at a Kubernetes Secret containing test credentials.
+  credentialsSecretName: ""
+  accessKeyIdSecretKey: AWS_ACCESS_KEY_ID
+  secretAccessKeySecretKey: AWS_SECRET_ACCESS_KEY
 
 serviceAccount:
   # Specifies whether a service account should be created

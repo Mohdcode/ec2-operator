@@ -1,0 +1,84 @@
+name: Deploy to staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag to deploy (for example, v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Install operator in staging
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 15
+    steps:
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Configure staging kubeconfig
+        env:
+          STAGING_KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          if [[ -z "$STAGING_KUBECONFIG" ]]; then
+            echo "Configure the KUBECONFIG secret in the GitHub staging environment first." >&2
+            exit 1
+          fi
+          kubeconfig_path="$RUNNER_TEMP/staging-kubeconfig"
+          umask 077
+          printf '%s' "$STAGING_KUBECONFIG" > "$kubeconfig_path"
+          echo "KUBECONFIG=$kubeconfig_path" >> "$GITHUB_ENV"
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use the vX.Y.Z format." >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+
+      - name: Check staging cluster access
+        run: kubectl cluster-info
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_ACTOR" --password-stdin
+
+      - name: Install or upgrade the EC2 Operator
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GHCR_PULL_SECRET_NAME: ${{ vars.GHCR_PULL_SECRET_NAME }}
+        run: |
+          owner="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          helm_args=(
+            upgrade --install ec2-operator "oci://ghcr.io/${owner}/charts/ec2-operator"
+            --version "$RELEASE_VERSION"
+            --namespace ec2-operator-system
+            --create-namespace
+            --set image.repository="ghcr.io/${owner}/ec2-operator"
+            --set image.tag="$RELEASE_TAG"
+            --wait
+            --timeout 10m
+          )
+          if [[ -n "$GHCR_PULL_SECRET_NAME" ]]; then
+            helm_args+=(--set "imagePullSecrets[0].name=$GHCR_PULL_SECRET_NAME")
+          fi
+          helm "${helm_args[@]}"
+          kubectl rollout status deployment/ec2-operator \
+            --namespace ec2-operator-system \
+            --timeout=5m

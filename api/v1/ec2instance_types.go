@@ -41,13 +41,13 @@ type Ec2Instance struct {
 
 // Ec2InstanceStatus defines the observed state of Ec2Instance.
 type Ec2InstanceStatus struct {
-	InstanceID string       `json:"instanceId,omitempty"`
-	State      string       `json:"state,omitempty"`
-	PublicIP   string       `json:"publicIP,omitempty"`
-	PrivateIP  string       `json:"privateIP,omitempty"`
-	PublicDNS  string       `json:"publicDNS,omitempty"`
-	PrivateDNS string       `json:"privateDNS,omitempty"`
-	LaunchTime *metav1.Time `json:"launchTime,omitempty"`
+	InstanceID string             `json:"instanceId,omitempty"`
+	State      string             `json:"state,omitempty"`
+	PublicIP   string             `json:"publicIP,omitempty"`
+	PrivateIP  string             `json:"privateIP,omitempty"`
+	PublicDNS  string             `json:"publicDNS,omitempty"`
+	PrivateDNS string             `json:"privateDNS,omitempty"`
+	LaunchTime *metav1.Time       `json:"launchTime,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

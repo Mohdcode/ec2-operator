@@ -1,5 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= docker.io/Mohdcode/ec2-kubernetes-operator:latest
+LOCAL_IMAGE ?= ec2-operator:local
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -76,6 +77,17 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 		exit 1; \
 	}
 	go test ./test/e2e/ -v -ginkgo.v
+
+.PHONY: local-demo
+local-demo: ## Build and run the operator against LocalStack in a local kind cluster without AWS credentials.
+	LOCAL_IMAGE="$(LOCAL_IMAGE)" bash ./hack/local-demo.sh
+
+.PHONY: local-demo-clean
+local-demo-clean: ## Remove the local EC2 Operator demo resources and kind cluster.
+	- kubectl delete -f config/samples/compute_v1_ec2instance.yaml --ignore-not-found
+	- helm uninstall ec2-operator --namespace ec2-operator-system
+	- kubectl delete namespace ec2-operator-system localstack --ignore-not-found
+	- kind delete cluster --name ec2-operator
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

@@ -1,0 +1,42 @@
+name: Local EC2 integration
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  local-ec2:
+    name: Run operator against LocalStack in kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install Helm
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Run the local EC2 demo
+        run: make local-demo
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get ec2instances -A -o yaml || true
+          kubectl logs -n ec2-operator-system deployment/ec2-operator --tail=200 || true
+          kubectl logs -n localstack deployment/localstack --tail=200 || true
+
+      - name: Clean up local cluster
+        if: always()
+        run: make local-demo-clean

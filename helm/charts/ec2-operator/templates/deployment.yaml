@@ -4,7 +4,7 @@ metadata:
   name: {{ include "ec2-operator.fullname" . }}
   labels:
     {{- include "ec2-operator.labels" . | nindent 4 }}
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -35,16 +35,22 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+          {{- if .Values.aws.endpoint }}
+          - name: AWS_ENDPOINT
+            value: {{ .Values.aws.endpoint | quote }}
+          {{- end }}
+          {{- if .Values.aws.credentialsSecretName }}
           - name: AWS_ACCESS_KEY_ID
             valueFrom:
-               secretKeyRef:
-                 name: aws-config
-                 key: AWS_ACCESS_KEY_ID
+              secretKeyRef:
+                name: {{ .Values.aws.credentialsSecretName | quote }}
+                key: {{ .Values.aws.accessKeyIdSecretKey | quote }}
           - name: AWS_SECRET_ACCESS_KEY
             valueFrom:
-               secretKeyRef:
-                 name: aws-config
-                 key: AWS_SECRET_ACCESS_KEY
+              secretKeyRef:
+                name: {{ .Values.aws.credentialsSecretName | quote }}
+                key: {{ .Values.aws.secretAccessKeySecretKey | quote }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

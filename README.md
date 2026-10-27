@@ -1,145 +1,98 @@
 # EC2 Operator
 
-A Kubernetes-native operator, written in Go, that manages the full lifecycle of AWS EC2 instances declaratively — through Kubernetes Custom Resource Definitions (CRDs) — instead of manual provisioning via the AWS Console or CLI.
+A Kubernetes operator written in Go that provisions and terminates AWS EC2 instances from `Ec2Instance` custom resources. The controller reports the instance ID and observed state to the Kubernetes resource and uses a finalizer to request EC2 termination when the resource is deleted.
 
-## Description
+The project includes a no-AWS local demo using kind and LocalStack, plus a GitHub Actions workflow that runs the same demo on pull requests and pushes.
 
-This project lets you describe the EC2 instance you want as a Kubernetes resource, and the operator takes care of actually creating, updating, and deleting it in AWS to match. It follows the same reconciliation pattern Kubernetes itself uses internally: you declare *desired state*, and a controller continuously works to make *actual state* match it.
+## Try it locally without AWS
 
-Built with [kubebuilder](https://book.kubebuilder.io/) and [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime), using the AWS SDK for Go to interact with EC2.
-
-### What it does
-
-- Watches `Ec2Instance` custom resources and reconciles them against real AWS EC2 state
-- Creates, updates, and terminates EC2 instances based on the CR spec
-- **Active Drift Detection**: Periodically verifies AWS state and automatically corrects discrepancies or clears status if the instance was manually deleted
-- **Production-Grade Status**: Uses standard Kubernetes Conditions (Ready, Synced) to provide detailed state transitions and error reporting
-- Uses a finalizer to ensure the AWS instance is properly terminated before the CR is removed from Kubernetes, avoiding orphaned cloud resources
-- Writes live instance data (public IP, instance ID) back into the CR's `status`, so `kubectl get` shows real-time state
-- Packaged as a Helm chart for installation, including CRDs, RBAC, and the controller deployment
-
-### Custom Resource spec
-
-An `Ec2Instance` resource supports the following fields:
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `amiId` | string | Yes | AMI to launch the instance from |
-| `instanceType` | string | Yes | EC2 instance type (e.g. `t2.micro`) |
-| `region` | string | Yes | AWS region to provision in |
-| `availabilityZone` | string | No | Specific AZ within the region |
-| `subnet` | string | No | Subnet to launch into |
-| `securityGroups` | []string | No | Security groups to attach |
-| `associatePublicIP` | boolean | No | Whether to assign a public IP |
-| `keyPair` | string | No | SSH key pair name |
-| `storage` | object | No | Storage configuration for the instance |
-| `tags` | map[string]string | No | Tags to apply to the instance |
-| `userData` | string | No | Instance bootstrap script |
-
-## Getting Started
- 
 ### Prerequisites
- 
-- Go v1.23+
+
 - Docker
+- kind
 - kubectl
-- Access to a Kubernetes cluster (tested locally with [kind](https://kind.sigs.k8s.io/))
-- Helm v3+
-- AWS credentials with EC2 permissions (or LocalStack for local testing)
- 
-### Local Testing with LocalStack (No AWS Account Needed)
- 
-You can test the operator locally using [LocalStack](https://localstack.cloud/) to emulate AWS:
- 
-1. **Start LocalStack (Community Version)**:
-    ```bash
-    docker run -d --name localstack \
-      -p 4566:4566 \
-      --platform linux/amd64 \
-      localstack/localstack:2.0
-    ```
-    *Note: Using version 2.0 ensures the community edition is used without requiring a license token.*
- 
-2. **Run the Operator locally**:
-    ```bash
-    export AWS_ACCESS_KEY_ID=test
-    export AWS_SECRET_ACCESS_KEY=test
-    export AWS_ENDPOINT=http://localhost:4566
-    go run cmd/main.go
-    ```
- 
-3. **Provision an instance**:
-    ```bash
-    kubectl apply -k config/samples/
-    kubectl get ec2instances -w
-    ```
- 
-### Deploying with Helm (recommended)
+- Helm 3
 
-This is the tested, working installation path:
+Run:
 
 ```bash
-# 1. Create a namespace and install the chart
-helm install ec2-operator ./helm/charts/ec2-operator \
-  --namespace ec2-operator-system --create-namespace
+make local-demo
 ```
 
-> **Note:** the chart currently creates its own `ec2-operator` namespace as part of its templates, so resources land there regardless of the `--namespace` flag passed to Helm. This is a known detail I plan to clean up by templating the namespace name properly (`{{ .Release.Namespace }}`).
+This builds the controller image, starts a kind cluster, deploys LocalStack with the EC2 API enabled, installs the Helm chart, and applies a sample `Ec2Instance`. It creates a Kubernetes Secret with LocalStack's test-only credentials; no AWS account or cloud credentials are used.
 
-Verify the controller is running:
+Watch the resource status:
 
 ```bash
-kubectl get pods -n ec2-operator
+kubectl get ec2instances --watch
+kubectl describe ec2instance ec2instance-sample
 ```
 
-You should see the controller pod in `Running` state.
-
-### Deploying manually (without Helm)
+Remove the demo resources and cluster:
 
 ```bash
-# Install the CRDs
-make install
-
-# Build and push your image
-make docker-build docker-push IMG=<your-registry>/ec2operator:tag
-
-# Deploy the controller
-make deploy IMG=<your-registry>/ec2operator:tag
+make local-demo-clean
 ```
 
-### Creating an instance
+The local run checks the operator against LocalStack's EC2 API implementation. Emulator behavior can differ from AWS, so this does not establish that a deployment or every EC2 feature works in a real AWS account.
+
+## Run checks
 
 ```bash
-kubectl apply -k config/samples/
+make test
+make lint
+helm lint ./helm/charts/ec2-operator
 ```
 
-Check the resulting resource, including its live AWS status:
+The `Local EC2 integration` GitHub Actions workflow builds the image and runs `make local-demo` on pull requests and pushes. It needs no AWS credentials or hosted Kubernetes cluster. The existing `test-e2e` target covers the controller manager and metrics endpoint in kind.
+
+Pushing a `vX.Y.Z` Git tag runs the release workflow, which publishes the container image to GitHub Container Registry and the Helm chart as an OCI artifact. This publishing step uses the repository's built-in GitHub token and does not deploy to AWS.
+
+When a staging Kubernetes cluster is available, the `Deploy to staging` workflow can be run manually with a published release tag. Configure a GitHub Environment named `staging` with a `KUBECONFIG` secret first. The workflow installs or upgrades the operator and waits for its Deployment to become ready; it does not create an `Ec2Instance` or launch cloud resources. Make the GHCR image public or create an image-pull Secret in the staging namespace and set the environment variable `GHCR_PULL_SECRET_NAME` to that Secret's name. The operator needs AWS credentials or a workload identity in the cluster only when it is asked to manage an EC2 resource.
+
+## Install against AWS
+
+The chart uses the AWS SDK's default credential chain, so it can use environment credentials or a workload identity/pod role. To provide credentials through a pre-created Kubernetes Secret, create one in the release namespace:
 
 ```bash
-kubectl get ec2instances
-kubectl describe ec2instance <name>
+kubectl create namespace ec2-operator-system
+kubectl create secret generic aws-credentials \
+  --namespace ec2-operator-system \
+  --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+
+helm upgrade --install ec2-operator ./helm/charts/ec2-operator \
+  --namespace ec2-operator-system \
+  --set aws.credentialsSecretName=aws-credentials
 ```
 
-### Cleaning up
+Do not put real credentials in chart values or commit them to the repository. To target an AWS-compatible local endpoint, set `aws.endpoint` and reference a Secret containing that service's test credentials.
 
-```bash
-kubectl delete -k config/samples/
-helm uninstall ec2-operator -n ec2-operator-system
-make uninstall
-```
+## Custom resource
 
-## Why I built this
+The API currently defines these desired-state fields:
 
-I built this after a CNCF LFX Mentorship on the Kyverno project, where I worked deeply with Kubernetes' controller and reconciliation model. I wanted to build one myself from scratch — CRD design, reconciliation logic, and real integration with an external system (AWS) — rather than just working within an existing controller.
+| Field | Description |
+| --- | --- |
+| `amiId` | AMI ID used to launch the instance |
+| `instanceType` | EC2 instance type |
+| `region` | AWS region |
+| `availabilityZone`, `subnet`, `securityGroups`, `associatePublicIP` | Network and placement settings |
+| `keyPair`, `userData`, `tags`, `storage` | Access, bootstrap, tags, and volume settings |
 
-## Known limitations / next steps
+Example: [`config/samples/compute_v1_ec2instance.yaml`](config/samples/compute_v1_ec2instance.yaml).
 
-- AWS credentials are read from environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) inside the controller, injected via `secretKeyRef` from the `aws-config` Kubernetes Secret rather than being embedded in the CR spec or container image — this is the correct pattern; an earlier version of this project passed credentials directly in the CR spec, which is not secure, and was corrected.
-- The chart's namespace is currently hardcoded rather than following `{{ .Release.Namespace }}`.
-- No support yet for reacting to AWS changes in real-time via EventBridge; drift is corrected during the periodic reconciliation cycle.
+At launch, the controller passes the declared placement, networking, key pair, user data, tags, and EBS volume settings to EC2. It then records the instance ID and periodically refreshes observed state and IP information. Editing a resource's spec after creation does not yet update the existing EC2 instance, so this is not full desired-state drift correction.
+
+## Project layout
+
+- `api/v1/`: `Ec2Instance` API types and generated CRD source
+- `internal/controller/`: reconciliation and EC2 client logic
+- `helm/charts/ec2-operator/`: installable Helm chart
+- `config/localstack/`: LocalStack deployment for the local demo
+- `.github/workflows/local-integration.yml`: no-cloud integration workflow
+- `terraform/`: supporting infrastructure configuration
 
 ## Contributing
 
-Issues and PRs are welcome. Run `make help` for available `make` targets.
-
-More on the underlying framework: [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Changes are welcome. Start with `make help` to see the available build, test, and deployment targets.

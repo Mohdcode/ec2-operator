@@ -7,29 +7,21 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 )
 
-func awsClient(region string) *ec2.Client {
-	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, "")),
-	)
+func awsClient(ctx context.Context, region string) (*ec2.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
-		fmt.Println("Error loading AWS config:", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("load AWS configuration: %w", err)
 	}
 
-	// Support for LocalStack: if AWS_ENDPOINT is set, provide it to the client constructor
+	// AWS_ENDPOINT is optional and supports AWS-compatible local development services.
 	if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
 		return ec2.NewFromConfig(cfg, func(o *ec2.Options) {
 			o.BaseEndpoint = aws.String(endpoint)
-		})
+		}), nil
 	}
 
-	return ec2.NewFromConfig(cfg)
+	return ec2.NewFromConfig(cfg), nil
 }
